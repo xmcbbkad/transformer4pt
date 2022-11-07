@@ -1,8 +1,17 @@
 import numpy as np
+import pandas as pd
+import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import math
+from torch.utils.data.dataset import Dataset
+from torch.utils.data.dataloader import DataLoader
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
 
 EMBEDDING_SIZE = 512  # 每个token Embedding的维度
 FC_SIZE = 2048  # 前馈神经网络中Linear层映射到多少维度
@@ -23,7 +32,7 @@ class ScaledDotProductAttention(nn.Module):
         # 首先经过matmul函数得到的scores形状是: [batch_size x N_HEADS x len_q x len_k]
         scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(D_k)
 
-        # 然后最关键的地方来了，下面这个就是用到了我们之前重点讲的attn_mask，把被mask的地方置为无限小，softmax之后基本就是0，对其他单词就不会起作用
+        # 把被mask的地方置为无限小，softmax之后基本就是0，对其他单词就不会起作用
         scores.masked_fill_(attn_mask, -1e9)  # Fills elements of self tensor with value where mask is one.
         attn = nn.Softmax(dim=-1)(scores)
         context = torch.matmul(attn, V)
@@ -44,7 +53,6 @@ class MultiHeadAttention(nn.Module):
         self.layer_norm = nn.LayerNorm(EMBEDDING_SIZE)
 
     def forward(self, Q, K, V, attn_mask):
-
         # 这个多头注意力机制分为这几个步骤，首先映射分头，然后计算atten_scores，然后计算atten_value;
         # 输入进来的数据形状： Q: [batch_size x len_q x EMBEDDING_SIZE], K: [batch_size x len_k x EMBEDDING_SIZE],
         # V: [batch_size x len_k x EMBEDDING_SIZE]
@@ -88,7 +96,6 @@ class PoswiseFeedForwardNet(nn.Module):
         output = self.conv2(output).transpose(1, 2)
         return self.layer_norm(output + residual)
 
-
 # --------------------------#
 # get_attn_pad_mask的实现：
 # --------------------------#
@@ -104,17 +111,12 @@ def get_attn_pad_mask(seq_q, seq_k):
     pad_attn_mask = seq_k.data.eq(0).unsqueeze(1)  # batch_size x 1 x len_k, one is masking
     return pad_attn_mask.expand(batch_size, len_q, len_k)  # batch_size x len_q x len_k
 
-
-
-
-
 # ------------------------------#
 # Positional Encoding的代码实现
 # ------------------------------#
 class PositionalEncoding(nn.Module):
     def __init__(self, EMBEDDING_SIZE, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
-
         # 位置编码的实现其实很简单，直接对照着公式去敲代码就可以，下面的代码只是其中的一种实现方式；
         # 从理解来讲，需要注意的就是偶数和奇数在公式上有一个共同部分，我们使用log函数把次方拿下来，方便计算；
         # pos代表的是单词在句子中的索引，这点需要注意；比如max_len是128个，那么索引就是从0，1，2，...,127
@@ -139,8 +141,6 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 
-
-
 # ---------------------------------------------------#
 # EncoderLayer：包含两个部分，多头注意力机制和前馈神经网络
 # ---------------------------------------------------#
@@ -151,11 +151,6 @@ class EncoderLayer(nn.Module):
         self.pos_ffn = PoswiseFeedForwardNet()
 
     def forward(self, enc_inputs, enc_self_attn_mask):
-        """
-        下面这个就是做自注意力层，输入是enc_inputs，形状是[batch_size x seq_len_q x EMBEDDING_SIZE]，需要注意的是最初始的QKV矩阵是等同于这个
-        输入的，去看一下enc_self_attn函数.
-        """
-
         # enc_inputs to same Q,K,V
         enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs, enc_self_attn_mask)
         # enc_outputs: [batch_size x len_q x EMBEDDING_SIZE]
@@ -163,21 +158,13 @@ class EncoderLayer(nn.Module):
         return enc_outputs, attn
 
 
-# -----------------------------------------------------------------------------#
-# Encoder部分包含三个部分：词向量embedding，位置编码部分，自注意力层及后续的前馈神经网络
-# -----------------------------------------------------------------------------#
 class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
-        # 位置编码，这里是固定的正余弦函数，也可以使用类似词向量的nn.Embedding获得一个可以更新学习的位置编码
         self.pos_emb = PositionalEncoding(EMBEDDING_SIZE)
-        # 使用ModuleList对多个encoder进行堆叠，因为后续的encoder并没有使用词向量和位置编码，所以抽离出来；
         self.layers = nn.ModuleList([EncoderLayer() for _ in range(ENCODER_LAYERS)])
 
     def forward(self, inputs, inputs_mask):
-
-
-        # 这行是位置编码，把两者相加放到了pos_emb函数里面
         outputs = self.pos_emb(inputs.transpose(0, 1)).transpose(0, 1)
 
         enc_self_attn_mask = get_attn_pad_mask(inputs_mask, inputs_mask)
@@ -188,56 +175,89 @@ class Encoder(nn.Module):
         return enc_outputs, enc_self_attns
 
 
+class Embedding(nn.Module):
+    def __init__(self, num_feature):
+        super(Embedding, self).__init__()
+        self.linear = nn.Linear(num_feature, EMBEDDING_SIZE)        
+
+    def forward(self, inputs):
+        embedding = self.linear(inputs)
+        return embedding
 
 class Transformer(nn.Module):
-    def __init__(self):
+    def __init__(self, num_feature):
         super(Transformer, self).__init__()
-        self.encoder = Encoder()  # 编码层
+        self.feature_num = num_feature
+        self.embedding = Embedding(self.feature_num)
+        self.encoder = Encoder() 
         self.linear = nn.Linear(EMBEDDING_SIZE, 1)
 
     def forward(self, inputs, inputs_mask):
-        """
-        这里有两个数据进行输入，一个是enc_inputs，形状为[batch_size, src_len]，主要是作为编码端的输入，一个是dec_inputs，
-        形状为[batch_size, tgt_len]，主要是作为解码端的输入.
-        enc_inputs作为输入，形状为[batch_size, src_len]，输出由自己的函数内部指定，想要什么指定输出什么，可以是全部tokens的输出，
-        可以是特定每一层的输出，也可以是中间某些参数的输出；
-        """
+        embedding = self.embedding(self.inputs)
 
-        # enc_outputs就是编码端的输出，enc_self_attns这里没记错的话是QK转置相乘经softmax之后的矩阵值，代表
-        # 的是每个单词和其他单词的相关性，即相关性矩阵；
-        outputs, outputs_attns = self.encoder(inputs, inputs_mask)
-
-        # dec_outputs是decoder的主要输出，用于后续的linear映射； dec_self_attns类比于enc_self_attns，
-        # 是查看每个单词对decoder中输入的其余单词的相关性；dec_enc_attns是decoder中每个单词对encoder中每
-        # 个单词的相关性；
-        #dec_outputs, dec_self_attns, dec_enc_attns = self.decoder(dec_inputs, enc_inputs, enc_outputs)
-
-        # dec_outputs做映射到词表大小
-        # dec_logits : [batch_size x src_vocab_size x tgt_vocab_size]
-        #dec_logits = self.projection(dec_outputs)
-        #return dec_logits.view(-1, dec_logits.size(-1)), enc_self_attns, dec_self_attns, dec_enc_attns
-      
-        outputs = self.linear(outputs[:, 0, :])
+        outputs, outputs_attns = self.encoder(embedding, inputs_mask) #outputs.size() = batch_size * seq_len * embedding_size
+         
+        outputs = self.linear(outputs[:, 0, :])  #取[cls]做fc
 
         return outputs, outputs_attns
 
 
+class MyDataset(nn.Module):
+    def __init__(self, input_file):
+        super(MyDataset, self).__init__()
+ 
+        self.df = pd.read_csv(input_file)
+
+        self.df = self.df.drop(columns=['date'])
+ 
+        self.raw_data = np.array(self.df)
+ 
+        self.input_x = self.raw_data[:, 1:]
+        self.input_y = self.raw_data[:, 0]
+ 
+        self.input_x = self.input_x.astype(np.float32)
+        self.input_y = self.input_y.astype(np.float32)
+ 
+        self.input_x = torch.from_numpy(self.input_x)
+        self.input_y = torch.from_numpy(self.input_y)
+ 
+    def __len__(self):
+        return len(self.input_y)
+ 
+ 
+    def __getitem__(self, idx):
+        return self.input_x[idx], self.input_y[idx]
+
+
+
+
+
 if __name__ == '__main__':
-    inputs_x = torch.randn(10, 20, EMBEDDING_SIZE)  #batch_size * seq_len * EMBEDDING_SIZE
-    inputs_y = torch.randn(10, 1) #batch_size * seq_len * 1
-    inputs_mask_x = torch.ones(10, 20)
+    data_set = MyDataset('./TSLA.csv')
+    data_loader = DataLoader(data_set, batch_size=8, shuffle=True)    
 
-
-    model = Transformer()
+    model = Transformer(num_feature=len(data_set[0][0]))
     criterion = nn.MSELoss()# 定义损失函数
     optimizer = torch.optim.SGD(model.parameters(), lr=0.001)# 定义优化器
-    
-    for epoch in range(20):
-        optimizer.zero_grad()
-        outputs, outputs_attns = model(inputs_x, inputs_mask_x)
-        loss = criterion(outputs, inputs_y)
-        print('Epoch:', '%04d' % (epoch + 1), 'cost =', '{:.6f}'.format(loss))
-        loss.backward()
-        optimizer.step()
+
+    #inputs_x = torch.randn(10, 20, EMBEDDING_SIZE)  #batch_size * seq_len * EMBEDDING_SIZE
+    #inputs_y = torch.randn(10, 1) #batch_size * seq_len * 1
+    #inputs_mask_x = torch.ones(10, 20)
+
+    #for epoch in range(20):
+    #    optimizer.zero_grad()
+    #    outputs, outputs_attns = model(inputs_x, inputs_mask_x)
+    #    loss = criterion(outputs, inputs_y)
+    #    print('Epoch:', '%04d' % (epoch + 1), 'cost =', '{:.6f}'.format(loss))
+    #    loss.backward()
+    #    optimizer.step()
+
+    for epoch in range(10):
+        for i, data in enumerate(data_loader):
+            input_x, input_y = data
+            logger.info("aaaaa")                       
 
 
+
+
+ 
