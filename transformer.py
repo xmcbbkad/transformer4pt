@@ -9,9 +9,9 @@ import torch.optim as optim
 import math
 
 def make_batch(sentences):
-    input_batch = [[src_vocab[n] for n in sentences[0].split()]]
-    output_batch = [[tgt_vocab[n] for n in sentences[1].split()]]
-    target_batch = [[tgt_vocab[n] for n in sentences[2].split()]]
+    input_batch = [[src_vocab[n] for n in sentences[0][i].split()] for i in range(len(sentences[0]))]
+    output_batch = [[tgt_vocab[n] for n in sentences[1][i].split()] for i in range(len(sentences[1]))]
+    target_batch = [[tgt_vocab[n] for n in sentences[2][i].split()] for i in range(len(sentences[2]))]
     return torch.LongTensor(input_batch), torch.LongTensor(output_batch), torch.LongTensor(target_batch)
 
 
@@ -178,9 +178,6 @@ class EncoderLayer(nn.Module):
         return enc_outputs, attn
 
 
-# -----------------------------------------------------------------------------#
-# Encoder部分包含三个部分：词向量embedding，位置编码部分，自注意力层及后续的前馈神经网络
-# -----------------------------------------------------------------------------#
 class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
@@ -197,24 +194,26 @@ class Encoder(nn.Module):
         """
 
         # 下面这行代码通过src_emb进行索引定位，enc_outputs输出形状是[batch_size, src_len, d_model]
+        #enc_inputs.size() = batch_size * max_len
         enc_outputs = self.src_emb(enc_inputs)
+        #enc_outputs.size() = batch_size * max_len * d_model
 
         # 这行是位置编码，把两者相加放到了pos_emb函数里面
         enc_outputs = self.pos_emb(enc_outputs.transpose(0, 1)).transpose(0, 1)
+        #enc_outputs.size() = batch_size * max_len * d_model
 
         # get_attn_pad_mask是为了得到句子中pad的位置信息，给到模型后面，在计算自注意力和交互注意力的时候去掉pad符号的影响
         enc_self_attn_mask = get_attn_pad_mask(enc_inputs, enc_inputs)
+        #enc_self_attn_mask.size() = batch_size * max_len * max_len
         enc_self_attns = []
         for layer in self.layers:
             # 去看EncoderLayer层函数
             enc_outputs, enc_self_attn = layer(enc_outputs, enc_self_attn_mask)
+            #enc_outputs.size() = batch_size * max_len * d_model
+            #enc_self_attn.size() = batch_size * n_heads * max_len * max_len 
             enc_self_attns.append(enc_self_attn)
         return enc_outputs, enc_self_attns
 
-
-# --------------------#
-# DecoderLayer的实现
-# --------------------#
 class DecoderLayer(nn.Module):
     def __init__(self):
         super(DecoderLayer, self).__init__()
@@ -228,10 +227,6 @@ class DecoderLayer(nn.Module):
         dec_outputs = self.pos_ffn(dec_outputs)
         return dec_outputs, dec_self_attn, dec_enc_attn
 
-
-# ----------------#
-# Decoder的实现
-# ----------------#
 class Decoder(nn.Module):
     def __init__(self):
         super(Decoder, self).__init__()
@@ -240,29 +235,38 @@ class Decoder(nn.Module):
         self.layers = nn.ModuleList([DecoderLayer() for _ in range(n_layers)])
 
     def forward(self, dec_inputs, enc_inputs, enc_outputs):  # dec_inputs : [batch_size x target_len]
-        dec_outputs = self.tgt_emb(dec_inputs)  # [batch_size, tgt_len, d_model]
-        dec_outputs = self.pos_emb(dec_outputs.transpose(0, 1)).transpose(0, 1)  # [batch_size, tgt_len, d_model]
+       
+        #dec_inputs.size() = batch_size * max_len
+        dec_outputs = self.tgt_emb(dec_inputs)
+        #dec_outputs.size() = batch_size * max_len * d_model
+
+        dec_outputs = self.pos_emb(dec_outputs.transpose(0, 1)).transpose(0, 1)  
+        #dec_outputs.size() = batch_size * max_len * d_model
 
         # get_attn_pad_mask 自注意力层的时候的pad 部分
         dec_self_attn_pad_mask = get_attn_pad_mask(dec_inputs, dec_inputs)
+        #dec_self_attn_pad_mask.size() = batch_size * max_len * max_len
 
         # get_attn_subsequent_mask 这个做的是自注意层的mask部分，就是当前单词之后看不到，使用一个上三角为1的矩阵
         dec_self_attn_subsequent_mask = get_attn_subsequent_mask(dec_inputs)
+        #dec_self_attn_subsequent_mask.size() = batch_size * max_len * max_len
 
         # 两个矩阵相加，大于0的为1，不大于0的为0，为1的在之后就会被fill到无限小
         dec_self_attn_mask = torch.gt((dec_self_attn_pad_mask + dec_self_attn_subsequent_mask), 0)
+        #dec_self_attn_mask.size() = batch_size * max_len * max_len
 
-        # 这个做的是交互注意力机制中的mask矩阵，enc的输入是k，我去看这个k里面哪些是pad符号，给到后面的模型；注意哦，我q肯定也是有pad符号，
-        # 但是这里我不在意的，之前说了好多次了哈
+        # 这个做的是交互注意力机制中的mask矩阵，enc的输入是k，我去看这个k里面哪些是pad符号，给到后面的模型；注意哦，我q肯定也是有pad符号
         dec_enc_attn_mask = get_attn_pad_mask(dec_inputs, enc_inputs)
+        #dec_enc_attn_mask.size() = batch_size * max_len * max_len
 
         dec_self_attns, dec_enc_attns = [], []
         for layer in self.layers:
             dec_outputs, dec_self_attn, dec_enc_attn = layer(dec_outputs, enc_outputs, dec_self_attn_mask, dec_enc_attn_mask)
+            #dec_outputs.size() = batch_size * max_len * d_model
+            #dec_self_attn.size() = dec_enc_attn.size() = batch_size * n_head * max_len * max_len  
             dec_self_attns.append(dec_self_attn)
             dec_enc_attns.append(dec_enc_attn)
         return dec_outputs, dec_self_attns, dec_enc_attns
-
 
 # --------------------------------------------------#
 # 从整体网络结构来看，分为三个部分：编码层，解码层，输出层
@@ -283,40 +287,34 @@ class Transformer(nn.Module):
         可以是特定每一层的输出，也可以是中间某些参数的输出；
         """
 
-        # enc_outputs就是编码端的输出，enc_self_attns这里没记错的话是QK转置相乘经softmax之后的矩阵值，代表
-        # 的是每个单词和其他单词的相关性，即相关性矩阵；
+        # enc_outputs就是编码端的输出，enc_self_attns这里没记错的话是QK转置相乘经softmax之后的矩阵值，代表的是每个单词和其他单词的相关性，即相关性矩阵；
+        #enc_inputs.size() = batch_size * max_len
         enc_outputs, enc_self_attns = self.encoder(enc_inputs)
+        #enc_outputs.size() = batch_size * max_len * d_model
 
         # dec_outputs是decoder的主要输出，用于后续的linear映射； dec_self_attns类比于enc_self_attns，
-        # 是查看每个单词对decoder中输入的其余单词的相关性；dec_enc_attns是decoder中每个单词对encoder中每
-        # 个单词的相关性；
+        # 是查看每个单词对decoder中输入的其余单词的相关性；dec_enc_attns是decoder中每个单词对encoder中每个单词的相关性；
+
+        #dec_inputs.size() = enc_inputs.size() = batch_size * max_len
         dec_outputs, dec_self_attns, dec_enc_attns = self.decoder(dec_inputs, enc_inputs, enc_outputs)
+        #dec_outputs.size() = batch_size * max_len * d_model
+        #dec_self_attns.size() = dec_enc_attns.size() = n_layers * batch_size * n_heads * max_len * max_len
 
         # dec_outputs做映射到词表大小
         # dec_logits : [batch_size x src_vocab_size x tgt_vocab_size]
         dec_logits = self.projection(dec_outputs)
+        #dec_logits.size() = batch_size * max_len * vocab_size
         return dec_logits.view(-1, dec_logits.size(-1)), enc_self_attns, dec_self_attns, dec_enc_attns
 
 
 if __name__ == '__main__':
-
-    # 句子的输入部分:
     # ich mochte ein bier P: 编码端的输入，P代表填充字符Pad
     # S i want a beer: 解码端的输入，S代表Start
     # i want a beer E: 解码端的真实标签，E代表End
-    sentences = ['ich mochte ein bier P', 'S i want a beer', 'i want a beer E']
-
-    # ------------------------------------------------------------------------------#
-    # 一些简单的配置文件：
-    # Transformer Parameters
-    # Padding Should be Zero
-    # 构建词表：
-    # 构建编码端词表
-    src_vocab = {'P': 0, 'ich': 1, 'mochte': 2, 'ein': 3, 'bier': 4}
+    sentences = [['ich mochte ein bier P', 'ich mochte ein P P'], ['S i want a beer', 'S i want a P'], ['i want a beer E','i want a E P']]
+    
+    src_vocab = tgt_vocab = {'P': 0, 'ich': 1, 'mochte': 2, 'ein': 3, 'bier': 4, 'P1': 5, 'i': 6, 'want': 7, 'a': 8, 'beer': 9, 'S': 10, 'E': 11}
     src_vocab_size = len(src_vocab)
-
-    # 构建解码端词表，其实编码端和解码端可以共用一个词表
-    tgt_vocab = {'P': 0, 'i': 1, 'want': 2, 'a': 3, 'beer': 4, 'S': 5, 'E': 6}
     tgt_vocab_size = len(tgt_vocab)
 
     src_len = 5  # 输入长度
@@ -337,10 +335,14 @@ if __name__ == '__main__':
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     enc_inputs, dec_inputs, target_batch = make_batch(sentences)
+    #enc_inputs.size() = dec_inputs.size() = target_batch.size() = batch_size * max_len
 
     for epoch in range(20):
         optimizer.zero_grad()
         outputs, enc_self_attns, dec_self_attns, dec_enc_attns = model(enc_inputs, dec_inputs)
+        #outputs.size() = (batch_size * max_len) * vocab_size
+        #enc_self_attns.size() = dec_self_attns.size() = dec_enc_attns.size() = n_layers * batch_size * n_heads * max_len * max_len
+        #target_batch.contiguous().view(-1).size() = batch_size * max_leg
         loss = criterion(outputs, target_batch.contiguous().view(-1))
         print('Epoch:', '%04d' % (epoch + 1), 'cost =', '{:.6f}'.format(loss))
         loss.backward()
